@@ -28,15 +28,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
-      # 1. Installer Java
       - name: Setup JDK
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: ${{ github.event.inputs.jdkVersion }}
 
-      # 2. Télécharger le dépôt privé
       - name: Clone private repository
         env:
           REPO_URL: ${{ github.event.inputs.repository }}
@@ -57,10 +54,9 @@ jobs:
               "$AUTH_URL" workspace
           fi
 
-      # 3. Vérifier que le ZIP existe
       - name: Check ZIP
         run: |
-          echo "=== Fichiers du dépôt ==="
+          echo "=== Contenu du dépôt ==="
           find workspace -maxdepth 3 -type f -print
 
           if [ ! -f "workspace/LEONARK-final-orb.zip" ]; then
@@ -68,9 +64,8 @@ jobs:
             exit 1
           fi
 
-          echo "ZIP trouvé."
+          echo "OK : LEONARK-final-orb.zip trouvé."
 
-      # 4. Décompresser le projet
       - name: Extract LEONARK-final-orb.zip
         run: |
           rm -rf extracted
@@ -78,8 +73,8 @@ jobs:
 
           unzip -q "workspace/LEONARK-final-orb.zip" -d extracted
 
-          echo "=== Structure extraite ==="
-          find extracted -maxdepth 4 -type f \
+          echo "=== Projet extrait ==="
+          find extracted -maxdepth 5 -type f \
             \( -name "gradlew" \
             -o -name "settings.gradle" \
             -o -name "settings.gradle.kts" \
@@ -87,7 +82,6 @@ jobs:
             -o -name "build.gradle.kts" \) \
             -print
 
-      # 5. Trouver automatiquement le projet Gradle
       - name: Locate Gradle project
         run: |
           PROJECT_DIR=""
@@ -107,42 +101,56 @@ jobs:
           fi
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Aucun projet Gradle Android trouvé."
-            echo "Contenu extrait :"
-            find extracted -maxdepth 5 -type f -print
+            echo "ERROR: Aucun projet Gradle trouvé."
+            find extracted -maxdepth 6 -type f -print
             exit 1
           fi
 
           echo "Projet Gradle trouvé : $PROJECT_DIR"
-
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      # 6. Compiler l'APK
-      - name: Build APK
+      - name: Verify LEONARK project
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
+          echo "=== Vérification du projet ==="
+          echo "Répertoire : $PWD"
+
           if [ ! -f "gradlew" ]; then
-            echo "gradlew absent, création du wrapper..."
-            gradle wrapper
+            echo "ERROR: gradlew absent."
+            exit 1
+          fi
+
+          if [ ! -d "app" ]; then
+            echo "ERROR: dossier app absent."
+            exit 1
           fi
 
           chmod +x gradlew
 
-          yes | sdkmanager --licenses > /dev/null || true
+          echo "=== Fichiers principaux ==="
+          ls -la
 
-          echo "=== Compilation ==="
-          echo "Projet : $PWD"
-          echo "Tâche : ${{ github.event.inputs.taskName }}"
+      - name: Build Release APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          chmod +x gradlew
+
+          echo "======================================"
+          echo "      COMPILATION LEONARK RELEASE"
+          echo "======================================"
 
           ./gradlew ${{ github.event.inputs.taskName }} \
-            --stacktrace
+            --stacktrace \
+            --no-daemon
 
-      # 7. Chercher l'APK
       - name: Find APK
         run: |
           echo "=== APK générés ==="
 
-          find extracted -type f -name "*.apk" -print
+          find extracted \
+            -type f \
+            -name "*.apk" \
+            -print
 
           APK_COUNT=$(find extracted -type f -name "*.apk" | wc -l)
 
@@ -151,10 +159,55 @@ jobs:
             exit 1
           fi
 
-      # 8. Récupérer l'APK
+          echo "OK : $APK_COUNT APK trouvé(s)."
+
+      - name: Prepare APK
+        run: |
+          mkdir -p final-apk
+
+          APK=$(find extracted \
+            -type f \
+            -name "*.apk" \
+            -print -quit)
+
+          echo "APK sélectionné : $APK"
+
+          cp "$APK" "final-apk/LEONARK-release.apk"
+
+          echo "APK final :"
+          ls -lh final-apk/LEONARK-release.apk
+
       - name: Upload APK
         uses: actions/upload-artifact@v6
         with:
           name: LEONARK-APK
-          path: extracted/**/*.apk
+          path: final-apk/LEONARK-release.apk
+          retention-days: 7
+
+      - name: Create corrected ZIP
+        run: |
+          rm -f LEONARK-final-orb.zip
+
+          PROJECT_PARENT=$(dirname "${PROJECT_DIR}")
+          PROJECT_NAME=$(basename "${PROJECT_DIR}")
+
+          cd "$PROJECT_PARENT"
+
+          zip -qr \
+            "$GITHUB_WORKSPACE/LEONARK-final-orb.zip" \
+            "$PROJECT_NAME"
+
+          cd "$GITHUB_WORKSPACE"
+
+          echo "=== ZIP FINAL ==="
+          ls -lh LEONARK-final-orb.zip
+
+          echo "Nom vérifié :"
+          basename LEONARK-final-orb.zip
+
+      - name: Upload corrected ZIP
+        uses: actions/upload-artifact@v6
+        with:
+          name: LEONARK-final-orb
+          path: LEONARK-final-orb.zip
           retention-days: 7
