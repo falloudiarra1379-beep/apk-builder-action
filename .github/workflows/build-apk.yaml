@@ -1,213 +1,215 @@
-name: Build Android APK
+# LEONARK — build APK
+# À placer dans le dépôt sous : .github/workflows/build-apk.yml
+#
+# Fonctionne dans les deux cas :
+#   1) le dépôt contient LEONARK-final-orb.zip (n'importe où) -> il est extrait puis compilé
+#   2) le dépôt contient directement le projet Gradle         -> il est compilé tel quel
+#
+# Secrets utilisés (aucune valeur n'est écrite dans le code ni affichée dans les logs) :
+#   LEONARKTOKEN       (optionnel) jeton d'accès si le ZIP est dans un AUTRE dépôt privé
+#   KEYSTORE_BASE64    (optionnel) keystore de signature encodé en base64
+#   KEYSTORE_PASSWORD  (optionnel) mot de passe du keystore
+#   KEY_ALIAS          (optionnel) alias de la clé
+#   KEY_PASSWORD       (optionnel) mot de passe de la clé
+# Sans keystore, une clé jetable est générée : l'APK s'installe, mais chaque build
+# a une signature différente (désinstaller l'ancienne version avant de mettre à jour).
+
+name: LEONARK - Build APK
 
 on:
   workflow_dispatch:
     inputs:
-      repository:
-        description: "Git repository URL"
-        required: true
-        default: "https://github.com/TON-COMPTE/TON-DEPOT"
-
-      branchName:
-        description: "Git branch name [Optional]"
+      source_repo:
+        description: "Dépôt contenant le ZIP/projet (owner/repo). Vide = ce dépôt."
+        required: false
+        default: ""
+      source_ref:
+        description: "Branche ou tag. Vide = branche par défaut."
         required: false
         default: ""
 
-      jdkVersion:
-        description: "OpenJDK version"
-        required: false
-        default: "17"
+permissions:
+  contents: read
 
-      taskName:
-        description: "Gradle task"
-        required: false
-        default: "assembleRelease"
+concurrency:
+  group: leonark-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ANDROID_API: "34"
+  ANDROID_BUILD_TOOLS: "34.0.0"
+  ZIP_NAME: "LEONARK-final-orb.zip"
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
-      - name: Setup JDK
-        uses: actions/setup-java@v5
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          distribution: temurin
-          java-version: ${{ github.event.inputs.jdkVersion }}
+          repository: ${{ inputs.source_repo || github.repository }}
+          ref: ${{ inputs.source_ref || '' }}
+          token: ${{ secrets.LEONARKTOKEN || github.token }}
+          path: repo
 
-      - name: Clone private repository
-        env:
-          REPO_URL: ${{ github.event.inputs.repository }}
-          REPO_TOKEN: ${{ secrets.LEONARKTOKEN }}
+      - name: Localiser le projet (extraction du ZIP si présent)
+        id: locate
+        shell: bash
         run: |
-          if [[ -z "$REPO_TOKEN" ]]; then
-            echo "ERROR: LEONARKTOKEN is not configured."
-            exit 1
-          fi
-
-          AUTH_URL="https://x-access-token:${REPO_TOKEN}@${REPO_URL#https://}"
-
-          if [[ -z "${{ github.event.inputs.branchName }}" ]]; then
-            git clone --depth=1 "$AUTH_URL" workspace
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          ZIP="$(find repo -type f -iname "$ZIP_NAME" -not -path '*/.git/*' | head -n 1 || true)"
+          if [ -n "$ZIP" ]; then
+            echo "ZIP trouvé : $ZIP"
+            mkdir -p extracted
+            unzip -q -o "$ZIP" -d extracted
+            SEARCH_ROOT="extracted"
           else
-            git clone --depth=1 \
-              --branch "${{ github.event.inputs.branchName }}" \
-              "$AUTH_URL" workspace
+            echo "Aucun $ZIP_NAME : le dépôt est utilisé directement."
+            SEARCH_ROOT="repo"
           fi
 
-      - name: Check ZIP
-        run: |
-          echo "=== Contenu du dépôt ==="
-          find workspace -maxdepth 3 -type f -print
-
-          if [ ! -f "workspace/LEONARK-final-orb-1.zip" ]; then
-            echo "ERROR: LEONARK-final-orb.zip introuvable."
-            exit 1
-          fi
-
-          echo "OK : LEONARK-final-orb-1.zip trouvé."
-
-      - name: Extract LEONARK-final-orb.zip
-        run: |
-          rm -rf extracted
-          mkdir -p extracted
-
-          unzip -q "workspace/LEONARK-final-orb-1.zip" -d extracted
-
-          echo "=== Projet extrait ==="
-          find extracted -maxdepth 5 -type f \
-            \( -name "gradlew" \
-            -o -name "settings.gradle" \
-            -o -name "settings.gradle.kts" \
-            -o -name "build.gradle" \
-            -o -name "build.gradle.kts" \) \
-            -print
-
-      - name: Locate Gradle project
-        run: |
+          # Projet Gradle = dossier qui contient gradlew ET settings.gradle(.kts)
           PROJECT_DIR=""
-
-          GRADLEW=$(find extracted -type f -name "gradlew" -print -quit)
-
-          if [ -n "$GRADLEW" ]; then
-            PROJECT_DIR="$(dirname "$GRADLEW")"
-          else
-            SETTINGS=$(find extracted -type f \
-              \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
-              -print -quit)
-
-            if [ -n "$SETTINGS" ]; then
-              PROJECT_DIR="$(dirname "$SETTINGS")"
+          while IFS= read -r g; do
+            d="$(dirname "$g")"
+            if [ -f "$d/settings.gradle" ] || [ -f "$d/settings.gradle.kts" ]; then
+              PROJECT_DIR="$d"
+              break
             fi
-          fi
+          done < <(find "$SEARCH_ROOT" -type f -name gradlew -not -path '*/node_modules/*' | sort)
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Aucun projet Gradle trouvé."
-            find extracted -maxdepth 6 -type f -print
+            echo "::error::Aucun projet Gradle (gradlew + settings.gradle) trouvé dans $SEARCH_ROOT"
             exit 1
           fi
+          PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+          echo "Projet Gradle : $PROJECT_DIR"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          chmod +x "$PROJECT_DIR/gradlew"
 
-          echo "Projet Gradle trouvé : $PROJECT_DIR"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-      - name: Verify LEONARK project
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          echo "=== Vérification du projet ==="
-          echo "Répertoire : $PWD"
-
-          if [ ! -f "gradlew" ]; then
-            echo "ERROR: gradlew absent."
-            exit 1
-          fi
-
-          if [ ! -d "app" ]; then
-            echo "ERROR: dossier app absent."
-            exit 1
-          fi
-
-          chmod +x gradlew
-
-          echo "=== Fichiers principaux ==="
-          ls -la
-
-      - name: Build Release APK
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          chmod +x gradlew
-
-          echo "======================================"
-          echo "      COMPILATION LEONARK RELEASE"
-          echo "======================================"
-
-          ./gradlew ${{ github.event.inputs.taskName }} \
-            --stacktrace \
-            --no-daemon
-
-      - name: Find APK
-        run: |
-          echo "=== APK générés ==="
-
-          find extracted \
-            -type f \
-            -name "*.apk" \
-            -print
-
-          APK_COUNT=$(find extracted -type f -name "*.apk" | wc -l)
-
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "ERROR: Aucun APK généré."
-            exit 1
-          fi
-
-          echo "OK : $APK_COUNT APK trouvé(s)."
-
-      - name: Prepare APK
-        run: |
-          mkdir -p final-apk
-
-          APK=$(find extracted \
-            -type f \
-            -name "*.apk" \
-            -print -quit)
-
-          echo "APK sélectionné : $APK"
-
-          cp "$APK" "final-apk/LEONARK-release.apk"
-
-          echo "APK final :"
-          ls -lh final-apk/LEONARK-release.apk
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v6
+      - name: JDK 17
+        uses: actions/setup-java@v4
         with:
-          name: LEONARK-APK
-          path: final-apk/LEONARK-release.apk
-          retention-days: 7
+          distribution: temurin
+          java-version: "17"
 
-      - name: Create corrected ZIP
-        run: |
-          rm -f LEONARK-final-orb-1.zip
-
-          PROJECT_PARENT=$(dirname "${PROJECT_DIR}")
-          PROJECT_NAME=$(basename "${PROJECT_DIR}")
-
-          cd "$PROJECT_PARENT"
-
-          zip -qr \
-            "$GITHUB_WORKSPACE/LEONARK-final-orb.zip" \
-            "$PROJECT_NAME"
-
-          cd "$GITHUB_WORKSPACE"
-
-          echo "=== ZIP FINAL ==="
-          ls -lh LEONARK-final-orb-1.zip
-
-          echo "Nom vérifié :"
-          basename LEONARK-final-orb.zip
-
-      - name: Upload corrected ZIP
-        uses: actions/upload-artifact@v6
+      - name: SDK Android
+        uses: android-actions/setup-android@v3
         with:
-          name: LEONARK-final-orb
-          path: LEONARK-final-orb-1.zip
+          packages: >-
+            platform-tools
+            platforms;android-${{ env.ANDROID_API }}
+            build-tools;${{ env.ANDROID_BUILD_TOOLS }}
+
+      - name: Gradle (cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Informations d'environnement
+        shell: bash
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+        run: |
+          java -version
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ./gradlew --version
+
+      - name: Compiler l'APK Debug
+        shell: bash
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+        run: |
+          ./gradlew assembleDebug --no-daemon --stacktrace \
+            "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8"
+
+      - name: Compiler l'APK Release
+        shell: bash
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+        run: |
+          ./gradlew assembleRelease --no-daemon --stacktrace \
+            "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8"
+
+      - name: Signer et vérifier l'APK Release
+        shell: bash
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS"
+          OUT_DIR="$GITHUB_WORKSPACE/dist"
+          mkdir -p "$OUT_DIR"
+
+          REL_DIR="app/build/outputs/apk/release"
+          echo "Contenu de $REL_DIR :"; ls -la "$REL_DIR"
+
+          # APK Release produit par Gradle (non signé si aucun signingConfig n'est défini)
+          SRC="$(find "$REL_DIR" -maxdepth 1 -type f -name '*.apk' | head -n 1)"
+          if [ -z "$SRC" ]; then
+            echo "::error::Aucun APK Release trouvé dans $REL_DIR"
+            exit 1
+          fi
+          echo "APK Release Gradle : $SRC"
+
+          # Keystore : secrets si présents, sinon clé jetable
+          if [ -n "${KEYSTORE_BASE64:-}" ] && [ -n "${KEYSTORE_PASSWORD:-}" ] && [ -n "${KEY_ALIAS:-}" ]; then
+            echo "Signature avec le keystore fourni par les secrets."
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            KS_PASS="$KEYSTORE_PASSWORD"
+            K_ALIAS="$KEY_ALIAS"
+            K_PASS="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+          else
+            echo "::warning::Aucun keystore dans les secrets : clé de signature jetable générée pour ce build."
+            KS_PASS="$(openssl rand -hex 16)"
+            K_ALIAS="leonark-ci"
+            K_PASS="$KS_PASS"
+            keytool -genkeypair -keystore "$RUNNER_TEMP/release.jks" \
+              -alias "$K_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$KS_PASS" -keypass "$K_PASS" \
+              -dname "CN=LEONARK, O=LEONARK, C=FR" >/dev/null 2>&1
+          fi
+
+          # zipalign puis apksigner (ordre imposé pour la signature v2/v3)
+          "$BT/zipalign" -f -p 4 "$SRC" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign \
+            --ks "$RUNNER_TEMP/release.jks" \
+            --ks-key-alias "$K_ALIAS" \
+            --ks-pass "pass:$KS_PASS" \
+            --key-pass "pass:$K_PASS" \
+            --out "$OUT_DIR/LEONARK-release.apk" \
+            "$RUNNER_TEMP/aligned.apk"
+
+          # Vérifications : signature valide, fichier non vide, reconnu comme APK Android
+          "$BT/apksigner" verify --verbose "$OUT_DIR/LEONARK-release.apk"
+          test -s "$OUT_DIR/LEONARK-release.apk"
+          "$BT/aapt2" dump badging "$OUT_DIR/LEONARK-release.apk" | head -n 5
+
+          # Copie de l'APK Debug pour test rapide
+          DBG="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' | head -n 1 || true)"
+          if [ -n "$DBG" ]; then cp "$DBG" "$OUT_DIR/LEONARK-debug.apk"; fi
+
+          ls -la "$OUT_DIR"
+
+          rm -f "$RUNNER_TEMP/release.jks" "$RUNNER_TEMP/aligned.apk"
+
+      - name: Publier les APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LEONARK-apk
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publier le rapport de build (si échec)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LEONARK-build-reports
+          path: |
+            ${{ steps.locate.outputs.project_dir }}/app/build/reports/**
+            ${{ steps.locate.outputs.project_dir }}/build/reports/**
+          if-no-files-found: ignore
           retention-days: 7
