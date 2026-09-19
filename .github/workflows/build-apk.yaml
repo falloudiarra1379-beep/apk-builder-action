@@ -59,19 +59,19 @@ jobs:
           echo "=== Contenu du dépôt ==="
           find workspace -maxdepth 3 -type f -print
 
-          if [ ! -f "workspace/LEONARK-final-orb.zip" ]; then
+          if [ ! -f "workspace/LEONARK-final-orb-1.zip" ]; then
             echo "ERROR: LEONARK-final-orb.zip introuvable."
             exit 1
           fi
 
-          echo "OK : LEONARK-final-orb.zip trouvé."
+          echo "OK : LEONARK-final-orb-1.zip trouvé."
 
       - name: Extract LEONARK-final-orb.zip
         run: |
           rm -rf extracted
           mkdir -p extracted
 
-          unzip -q "workspace/LEONARK-final-orb.zip" -d extracted
+          unzip -q "workspace/LEONARK-final-orb-1.zip" -d extracted
 
           echo "=== Projet extrait ==="
           find extracted -maxdepth 5 -type f \
@@ -186,7 +186,7 @@ jobs:
 
       - name: Create corrected ZIP
         run: |
-          rm -f LEONARK-final-orb.zip
+          rm -f LEONARK-final-orb-1.zip
 
           PROJECT_PARENT=$(dirname "${PROJECT_DIR}")
           PROJECT_NAME=$(basename "${PROJECT_DIR}")
@@ -200,7 +200,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
 
           echo "=== ZIP FINAL ==="
-          ls -lh LEONARK-final-orb.zip
+          ls -lh LEONARK-final-orb-1.zip
 
           echo "Nom vérifié :"
           basename LEONARK-final-orb.zip
@@ -209,5 +209,5 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: LEONARK-final-orb
-          path: LEONARK-final-orb.zip
+          path: LEONARK-final-orb-1.zip
           retention-days: 7
